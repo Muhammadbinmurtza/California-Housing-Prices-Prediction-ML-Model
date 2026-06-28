@@ -12,7 +12,13 @@ from sklearn.linear_model import LinearRegression
 from sklearn.compose import TransformedTargetRegressor, make_column_selector,make_column_transformer,ColumnTransformer
 from sklearn.impute import SimpleImputer
 from sklearn.pipeline import Pipeline,make_pipeline
-
+from sklearn.base import BaseEstimator, TransformerMixin
+from sklearn.cluster import KMeans
+from sklearn.metrics.pairwise import rbf_kernel
+from sklearn.metrics import mean_squared_error, root_mean_squared_error
+from sklearn.tree import DecisionTreeRegressor
+from sklearn.model_selection import cross_val_score, GridSearchCV
+from sklearn.ensemble import RandomForestRegressor
 
 data = pd.read_csv("documents/housing.csv")
 
@@ -139,8 +145,8 @@ isolation_forest = IsolationForest(random_state=42)  # to remove the outliers fr
 outliers_pred = isolation_forest.fit_predict(X)
 
 housing_cat = housing[["ocean_proximity"]]
-
-housing_cat_encoded = OrdinalEncoder.fit_transform(housing_cat)
+encoder = OrdinalEncoder()
+housing_cat_encoded = encoder.fit_transform(housing_cat)
 
 cat_encoder = OneHotEncoder()
 housing_cat_1hot = cat_encoder.fit_transform(housing_cat)
@@ -185,6 +191,35 @@ log_transformer = FunctionTransformer(np.log, inverse_func=np.exp)
 
 log_pop = log_transformer.transform(housing[["population"]])
 
+#Cluster similarity 
+
+class ClusterSimilarity(BaseEstimator, TransformerMixin):
+    def __init__(self, n_clusters=10, gamma=1.0, random_state=None):
+        self.n_clusters = n_clusters
+        self.gamma = gamma
+        self.random_state = random_state
+
+    def fit(self, X, y=None, sample_weight=None): 
+        self.kmeans_ = KMeans(
+            self.n_clusters,
+            random_state=self.random_state
+        )
+        self.kmeans_.fit(X, sample_weight=sample_weight)
+        return self
+
+    def transform(self, X):
+        return rbf_kernel(
+            X,
+            self.kmeans_.cluster_centers_,
+            gamma=self.gamma
+        )
+
+    def get_feature_names_out(self, names=None):
+        return [
+            f"Cluster {i} similarity"
+            for i in range(self.n_clusters)
+        ]
+    
 # pipeline for transformation Page #83
 num_pipeline = Pipeline([
     ("impute" , SimpleImputer(strategy="median")),
@@ -195,7 +230,7 @@ housing_num_prepared = num_pipeline.fit_transform(housing_num)
 housing_num_prepared[:2].round(2)
 
 df_housing_num_prepared = pd.DataFrame(
-    housing_num_prepared, columns=num_pipeline.get_feature_names_out(), index=housing_num.index()
+    housing_num_prepared, columns=num_pipeline.get_feature_names_out(), index=housing_num.index
 )
 
 # now using the column transformer to handle both numerical and categorical values in a pipeline
@@ -208,6 +243,7 @@ cat_pipeline = make_pipeline(
     OneHotEncoder(handle_unknown="ignore")
 )
 
+
 preprocessing = ColumnTransformer([
     ("num", num_pipeline, num_attribs),
     ("cat", cat_pipeline, cat_attribs)
@@ -215,8 +251,145 @@ preprocessing = ColumnTransformer([
 
 preprocessing = make_column_transformer(
     (num_pipeline, make_column_selector(dtype_include=np.number)),
-    (cat_pipeline , make_column_selector(object))
+    (cat_pipeline , make_column_selector(dtype_include=object))
 )
 
 housing_prepared = preprocessing.fit_transform(housing)
 
+housing_prepared_df1 = pd.DataFrame(
+    housing_prepared, columns=preprocessing.get_feature_names_out(),index=housing.index
+)
+
+print(housing_prepared_df1)
+
+def column_ratio(X):
+    return X[:,[0]] / X[:,[1]]
+
+def ratio_name(function_transformer, feature_names_in):
+    return ["ratio"]
+
+def ratio_pipeline():
+    return make_pipeline(
+        SimpleImputer(strategy="median"),
+        FunctionTransformer(column_ratio, feature_names_out=ratio_name),
+        StandardScaler()
+    )
+
+log_pipeline = make_pipeline(
+    SimpleImputer(strategy="median"),
+    FunctionTransformer(np.log, feature_names_out="one-to-one"),
+    StandardScaler()
+)
+
+cluster_simil = ClusterSimilarity(n_clusters=10, gamma=1, random_state=42)
+
+default_num_pipeline = make_pipeline(SimpleImputer(strategy="median"),
+                                     StandardScaler())
+
+preprocessing = ColumnTransformer([
+        ("bedrooms", ratio_pipeline(), ["total_bedrooms", "total_rooms"]),
+        ("rooms_per_house", ratio_pipeline(), ["total_rooms", "households"]),
+        ("people_per_house", ratio_pipeline(), ["population", "households"]),
+        ("log", log_pipeline, ["total_bedrooms", "total_rooms", "population",
+                               "households", "median_income"]),
+        ("geo", cluster_simil, ["latitude", "longitude"]),
+        ("cat", cat_pipeline, make_column_selector(dtype_include=object)),
+    ],
+    remainder=default_num_pipeline)
+
+housing_prepared = preprocessing.fit_transform(housing)
+print(housing_prepared.shape)
+
+print(preprocessing.get_feature_names_out())
+
+lin_reg = make_pipeline(
+    preprocessing, 
+    LinearRegression()
+)
+
+lin_reg.fit(housing, housing_labels)
+
+housing_prediction = lin_reg.predict(housing)
+print(housing_prediction[:5].round(-2))
+
+print(housing_labels.iloc[:5].values)
+
+lin_rmse = root_mean_squared_error(housing_labels, housing_prediction)
+
+print(lin_rmse)
+
+tree_reg = make_pipeline(preprocessing, 
+                        DecisionTreeRegressor(random_state=42))
+
+tree_reg.fit(housing, housing_labels)
+
+housing_prediction = tree_reg.predict(housing)
+
+tree_rmse = root_mean_squared_error(housing_labels, housing_prediction)
+print(tree_rmse)  # provided zero error
+
+#checking the prediction on 10 cv sets
+
+tree_rmses = -cross_val_score(tree_reg, housing, housing_labels, scoring="neg_root_mean_squared_error", cv=10)
+
+print(pd.Series(tree_rmses).describe())
+'''
+prediction is not good a little better than linear regression but still bad
+count       10.000000
+mean     67331.259647
+std       2411.905355
+min      62697.335860
+25%      66006.108594
+50%      67430.321931
+75%      68628.596244
+max      71055.427006
+'''
+
+# let's try random forest 
+
+forest_reg = make_pipeline(preprocessing,
+                           RandomForestRegressor(random_state=42))
+
+forest_rmses = -cross_val_score(forest_reg,
+                               housing, 
+                               housing_labels,
+                               scoring="neg_root_mean_squared_error",
+                               cv=10)
+
+print(pd.Series(forest_rmses).describe())
+
+
+## Fine tune the model , random forest algorithm
+
+full_pipeline = Pipeline([
+    ("preprocessing", preprocessing),
+    ("random_forest", RandomForestRegressor(random_state=42))
+])
+
+param_grid = [
+    {
+        'preprocessing__geo__n_clusters' : [5,8,10],
+        'random_forest__max_features' : [4,6,8,]
+    },
+    {
+        'preprocessing__geo__n_clusters' : [10,15],
+        'random_forest__max_features' : [6,8,10]
+    }
+]
+
+grid_search = GridSearchCV(full_pipeline, param_grid, cv= 3, scoring= "neg_root_mean_squared_error")
+
+grid_search.fit(housing, housing_labels)
+
+print(grid_search.best_params_)
+
+cv_res = pd.DataFrame(grid_search.cv_results_)
+cv_res.sort_values(by="mean_test_score", ascending=False, inplace=True)
+cv_res = cv_res[["param_preprocessing__geo__n_clusters",
+                 "param_random_forest__max_features", "split0_test_score",
+                 "split1_test_score", "split2_test_score", "mean_test_score"]]
+score_cols = ["split0", "split1", "split2", "mean_test_rmse"]
+cv_res.columns = ["n_clusters", "max_features"] + score_cols
+cv_res[score_cols] = -cv_res[score_cols].round().astype(np.int64)
+
+print(cv_res.head())

@@ -1,7 +1,8 @@
 from sklearn.pipeline import Pipeline, make_pipeline
 from sklearn.impute import SimpleImputer
-from sklearn.preprocessing import StandardScaler, OneHotEncoder
+from sklearn.preprocessing import StandardScaler, OneHotEncoder, FunctionTransformer
 from sklearn.compose import ColumnTransformer
+import numpy as np
 
 num_pipeline = make_pipeline([
     SimpleImputer(strategy="median"),
@@ -28,3 +29,30 @@ num = Pipeline([
 ])
 
 
+def column_ratio(X):
+    return X[:,[0]] / X[:,[1]]
+
+def ratio_name(function_transformer, feature_names_in):
+    return ["ratio"]
+
+def ratio_pipeline():
+    return make_pipeline(
+    SimpleImputer(strategy="median"),
+    FunctionTransformer(column_ratio, feature_names_out=ratio_name ),
+    StandardScaler()
+)
+
+log_pipeline = make_pipeline(
+    SimpleImputer(strategy="median"),
+    FunctionTransformer(np.log , feature_names_out="one-to-one"),
+    StandardScaler()
+)
+
+default_num_pipeline = make_pipeline(
+    SimpleImputer(strategy="median"),
+    StandardScaler()
+)
+
+preprocessing = ColumnTransformer([
+    ("", column_ratio, [])
+])
